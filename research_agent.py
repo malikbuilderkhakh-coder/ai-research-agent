@@ -1,75 +1,114 @@
-from typing import Type
-
-# Workaround for CrewAI/Groq cache_breakpoint compatibility issue
 import crewai.llms.cache as crewai_cache
 
+# Workaround for the CrewAI/Groq cache_breakpoint issue
 crewai_cache.mark_cache_breakpoint = lambda msg: msg
 
 from crewai import Agent, Crew, Task, LLM
-from crewai.tools import BaseTool
 from ddgs import DDGS
-from pydantic import BaseModel, Field
 
 
-# ============================================================
-# 1. SEARCH INPUT
-# ============================================================
+def search_web(query: str, max_results: int = 3):
+    """
+    Search the web using DuckDuckGo.
+    This does not use the Groq API.
+    """
+    try:
+        results = DDGS().text(
+            query,
+            max_results=max_results
+        )
 
-class SearchInput(BaseModel):
-    query: str = Field(
-        ...,
-        description="A focused web search query."
+        if not results:
+            return []
+
+        return results
+
+    except Exception as e:
+        return [
+            {
+                "title": "Search Error",
+                "href": "",
+                "body": str(e)
+            }
+        ]
+
+
+def collect_research(topic: str, number_of_sources: int):
+    """
+    Collect web information before calling the LLM.
+    We use a small number of searches to reduce API usage.
+    """
+
+    queries = [
+        topic,
+        f"{topic} latest information",
+    ]
+
+    all_results = []
+
+    for query in queries:
+        results = search_web(
+            query,
+            max_results=number_of_sources
+        )
+
+        all_results.extend(results)
+
+    # Remove duplicate URLs
+    unique_results = []
+    seen_urls = set()
+
+    for result in all_results:
+        url = result.get("href", "")
+
+        if url and url not in seen_urls:
+            seen_urls.add(url)
+            unique_results.append(result)
+
+    # Keep the requested number of sources
+    return unique_results[:number_of_sources]
+
+
+def run_research(
+    topic: str,
+    number_of_sources: int,
+    api_key: str
+):
+    """
+    Main research function.
+
+    DuckDuckGo collects the sources first.
+    CrewAI then uses ONE LLM call to write the report.
+    """
+
+    # --------------------------------------------------
+    # STEP 1: Search the web
+    # --------------------------------------------------
+
+    sources = collect_research(
+        topic,
+        number_of_sources
     )
 
+    if not sources:
+        raise Exception(
+            "DuckDuckGo did not return any search results. "
+            "Please try another research topic."
+        )
 
-# ============================================================
-# 2. DUCKDUCKGO SEARCH TOOL
-# ============================================================
+    # --------------------------------------------------
+    # STEP 2: Prepare research information
+    # --------------------------------------------------
 
-class DuckDuckGoSearchTool(BaseTool):
+    research_text = ""
 
-    name: str = "DuckDuckGo Web Search"
+    for i, source in enumerate(sources, start=1):
 
-    description: str = (
-        "Search the public web using DuckDuckGo. "
-        "Returns titles, URLs, and snippets from search results."
-    )
+        title = source.get("title", "No title")
+        url = source.get("href", "No URL")
+        snippet = source.get("body", "No description")
 
-    args_schema: Type[BaseModel] = SearchInput
-
-    def _run(self, query: str) -> str:
-
-        try:
-
-            results = DDGS().text(
-                query,
-                max_results=5
-            )
-
-            if not results:
-                return "No search results were found."
-
-            output = []
-
-            for i, result in enumerate(results, start=1):
-
-                title = result.get(
-                    "title",
-                    "No title"
-                )
-
-                url = result.get(
-                    "href",
-                    "No URL"
-                )
-
-                snippet = result.get(
-                    "body",
-                    "No description"
-                )
-
-                output.append(
-                    f"""
+        research_text += f"""
 SOURCE {i}
 
 Title:
@@ -78,205 +117,148 @@ Title:
 URL:
 {url}
 
-Description:
+Information:
 {snippet}
+
+-----------------------------------
 """
-                )
 
-            return "\n".join(output)
-
-        except Exception as exc:
-
-            return f"Search failed: {exc}"
-
-
-# ============================================================
-# 3. RUN RESEARCH
-# ============================================================
-
-def run_research(
-    topic: str,
-    number_of_sources: int,
-    api_key: str
-):
-
-    # --------------------------------------------------------
-    # GROQ LLM
-    # --------------------------------------------------------
+    # --------------------------------------------------
+    # STEP 3: Create Groq LLM
+    # --------------------------------------------------
 
     llm = LLM(
-
         model="groq/openai/gpt-oss-120b",
-
         api_key=api_key,
-
         temperature=0.2,
-
-        reasoning_effort="low"
+        reasoning_effort="low",
     )
 
-
-    # --------------------------------------------------------
-    # RESEARCH AGENT
-    # --------------------------------------------------------
+    # --------------------------------------------------
+    # STEP 4: Create ONE CrewAI agent
+    # --------------------------------------------------
 
     researcher = Agent(
-
         role="Senior Research Analyst",
 
         goal=(
-            "Research the user's topic using reliable web sources "
-            "and create an accurate, structured and understandable "
-            "research report."
+            "Create an accurate, well-structured and easy-to-understand "
+            "research report using the research information provided."
         ),
 
         backstory=(
-            "You are a careful research analyst. "
-            "You search for relevant information, compare sources, "
-            "avoid unsupported claims, and clearly separate facts "
-            "from uncertain claims."
+            "You are a professional research analyst. "
+            "You carefully analyze research sources, "
+            "avoid inventing information, and clearly explain "
+            "important findings."
         ),
-
-        tools=[
-            DuckDuckGoSearchTool()
-        ],
 
         llm=llm,
 
-        verbose=True,
+        verbose=False,
 
-        allow_delegation=False
+        allow_delegation=False,
+
+        max_iter=1,
     )
 
-
-    # --------------------------------------------------------
-    # RESEARCH TASK
-    # --------------------------------------------------------
+    # --------------------------------------------------
+    # STEP 5: Create research task
+    # --------------------------------------------------
 
     task = Task(
 
         description=f"""
-
-Research the following topic:
+You need to write a research report about:
 
 {topic}
 
+The following information was collected from DuckDuckGo:
 
-Use the DuckDuckGo Web Search tool to perform real web research.
+{research_text}
 
+Use ONLY the information provided above as the research
+evidence.
 
-Research requirements:
+IMPORTANT RULES:
 
-1. Perform multiple searches when useful.
-
-2. Use approximately {number_of_sources}
-   useful sources where possible.
-
-3. Prefer authoritative and reputable sources.
-
-4. Do not invent facts, statistics,
-   quotations or sources.
-
-5. Clearly distinguish established facts
-   from uncertain claims.
-
-6. Include source titles and URLs
-   in the final report.
-
-7. Focus on useful and understandable information.
-
+1. Do not invent facts.
+2. Do not invent statistics.
+3. Do not invent quotations.
+4. Do not create fake sources.
+5. Clearly explain information in simple language.
+6. Mention limitations when the available information is limited.
+7. Include the actual URLs provided in the sources.
+8. Do not claim that you personally visited or verified a website.
+9. Use the source information carefully.
 
 Write the report using this structure:
 
-
 # Research Report
-
 
 ## 1. Executive Summary
 
 Give a short summary of the research.
 
-
 ## 2. Introduction
 
-Explain the topic and why it matters.
-
+Explain the topic and why it is important.
 
 ## 3. Key Findings
 
-Present the most important findings.
-
+List the most important findings.
 
 ## 4. Detailed Analysis
 
-Explain the topic in detail.
-
+Explain the research information in detail.
 
 ## 5. Benefits / Opportunities
 
-Discuss important benefits or opportunities.
-
+Explain important benefits or opportunities if applicable.
 
 ## 6. Challenges / Limitations
 
-Discuss important challenges and limitations.
-
+Explain important problems, risks, or limitations.
 
 ## 7. Current Developments
 
-Discuss recent developments when reliable
-information is available.
-
+Discuss recent developments only when supported by
+the provided research.
 
 ## 8. Conclusion
 
-Summarize the major findings.
-
+Give a short conclusion based on the evidence.
 
 ## 9. Sources
 
-List the sources used with their titles
-and URLs.
+List every source with:
 
+- Source title
+- URL
 
-Make the report clear enough for a beginner
+Make the report professional but easy for a beginner
 to understand.
-
 """,
 
         expected_output=(
-            "A complete, well-structured research report "
-            "containing an executive summary, introduction, "
-            "key findings, detailed analysis, benefits, "
-            "challenges, current developments, conclusion, "
-            "and source URLs."
+            "A complete research report with an executive summary, "
+            "introduction, key findings, detailed analysis, "
+            "benefits, challenges, current developments, "
+            "conclusion, and source URLs."
         ),
 
-        agent=researcher
+        agent=researcher,
     )
 
-
-    # --------------------------------------------------------
-    # CREW
-    # --------------------------------------------------------
+    # --------------------------------------------------
+    # STEP 6: Run CrewAI
+    # --------------------------------------------------
 
     crew = Crew(
-
-        agents=[
-            researcher
-        ],
-
-        tasks=[
-            task
-        ],
-
-        verbose=True
+        agents=[researcher],
+        tasks=[task],
+        verbose=False,
     )
-
-
-    # --------------------------------------------------------
-    # START RESEARCH
-    # --------------------------------------------------------
 
     result = crew.kickoff()
 
