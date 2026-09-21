@@ -112,7 +112,7 @@ def run_research(
 
         temperature=0.2,
 
-        reasoning_effort="medium"
+        reasoning_effort="low"
     )
 
 
