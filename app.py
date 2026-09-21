@@ -21,9 +21,9 @@ with st.sidebar:
     st.header("Research Settings")
     number_of_sources = st.slider(
         "Number of sources",
-        min_value=3,
-        max_value=10,
-        value=5,
+        min_value=2,
+        max_value=3,
+        value=2,
     )
     st.caption("Model: openai/gpt-oss-120b via Groq")
 
