@@ -1,5 +1,6 @@
-streamlit==1.64.0
-crewai==1.15.22
-ddgs==9.10.0
-pydantic>=2.10,<3
-litellm>=1.75,<2
+streamlit
+crewai
+crewai-tools
+groq
+ddgs
+python-dotenv
